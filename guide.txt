@@ -1,0 +1,222 @@
+EKF PROJECT - SIMPLE USAGE GUIDE
+================================
+
+WHAT THIS PROJECT DOES
+----------------------
+A small Extended Kalman Filter (EKF) for a two-wheel differential-drive robot.
+It fuses two sensors:
+
+  * IMU (accelerometer + gyroscope)  -> used in predict()
+  * left / right wheel encoders      -> used in update()
+
+The state vector has 7 values:
+
+  X = [ theta, vx, vy, wz, bias_ax, bias_ay, bias_wz ]
+
+  theta    heading angle          [rad]      (world frame)
+  vx, vy   linear velocity        [m/s]      (WORLD frame)
+  wz       yaw rate               [rad/s]    (body frame)
+  bias_ax  accelerometer X bias   [m/s^2]
+  bias_ay  accelerometer Y bias   [m/s^2]
+  bias_wz  gyroscope Z bias       [rad/s]
+
+Two noise matrices are used:
+
+  Q  = IMU process noise      -> obtained from tunning.py
+  R  = ENCODER measurement noise -> you set this by hand (see section 3)
+
+
+PROJECT FILES
+-------------
+  include/ekf.hpp   class declaration
+  src/ekf.cpp       implementation
+  tunning.py        IMU noise tuning (computes Q)
+  library/eigen     Eigen library (matrix math)
+  requirement.txt   Python packages needed by tunning.py
+
+
+1) HOW TO USE THE TUNING TOOL (tunning.py)
+------------------------------------------
+tunning.py reads recorded IMU data and returns the 6 values for set_Q().
+
+It needs numpy and allantools:
+
+  pip install -r requirement.txt
+
+Collect an IMU log (best with the robot standing still)
+and call:
+
+  import numpy as np
+  from tunning import q_from_imu
+
+  ax = np.array([...])   # accelerometer X samples [m/s^2]
+  ay = np.array([...])   # accelerometer Y samples [m/s^2]
+  gz = np.array([...])   # gyroscope Z samples     [rad/s]
+  fs = 100.0             # sampling rate [Hz]
+
+  q1, q2, q3, q4, q5, q6 = q_from_imu(ax, ay, gz, fs)
+
+Meaning of the returned values:
+
+  q1 = accelerometer X white-noise coefficient
+  q2 = accelerometer Y white-noise coefficient
+  q3 = gyroscope Z white-noise coefficient
+  q4 = accelerometer X random-walk coefficient (bias drift)
+  q5 = accelerometer Y random-walk coefficient (bias drift)
+  q6 = gyroscope Z random-walk coefficient (bias drift)
+
+Pass them directly to the C++ filter:
+
+  ekf.set_Q(q1, q2, q3, q4, q5, q6);
+
+Note: tunning.py only computes Q (IMU noise).
+It does NOT compute R. R is encoder noise and is set separately.
+
+
+2) HOW TO USE THE C++ CODE
+--------------------------
+Include the header, create one filter object, initialize it once,
+then call predict() and update() in your control loop.
+
+  #include "ekf.hpp"
+
+  ekf f;
+
+  // --- initialization (do this once, before the loop) ---
+  f.set_distance_between_wheels(0.30);          // L in meters
+
+  f.set_initial_state(
+      0.0,   // theta  [rad]
+      0.0,   // vx     [m/s]
+      0.0,   // vy     [m/s]
+      0.0,   // wz     [rad/s]
+      0.0,   // bias_ax
+      0.0,   // bias_ay
+      0.0    // bias_wz
+  );
+
+  f.set_Q(q1, q2, q3, q4, q5, q6);              // from tunning.py
+
+  f.set_R(r_right, r_left);                     // encoder noise (section 3)
+
+  // --- inside the loop, every dt seconds ---
+  f.predict(ax, ay, wz, dt);
+  f.update(v_right, v_left);
+
+  // --- read the result ---
+  double theta = f.X(0);
+  double vx    = f.X(1);   // world frame
+  double vy    = f.X(2);   // world frame
+  double wz_e  = f.X(3);
+  double bax   = f.X(4);
+  double bay   = f.X(5);
+  double bwz   = f.X(6);
+
+Inputs of predict():
+  ax, ay  accelerometer readings [m/s^2], BODY frame
+  wz      gyroscope yaw rate     [rad/s], body frame
+  dt      time since last call   [s]
+
+Inputs of update():
+  v_right, v_left   wheel linear speeds [m/s] (not encoder ticks)
+
+Convert encoder ticks to linear speed before calling update():
+
+  v_wheel = (ticks_delta / ticks_per_rev) * (2*pi*wheel_radius) / dt
+
+If update() rejects a wheel measurement (outlier), the flag
+f.reject_measurement is set to true and that update is skipped.
+You can read it after calling update():
+
+  if (f.reject_measurement) { /* wheel reading was ignored */ }
+
+Important:
+  * Always call set_distance_between_wheels() before update().
+  * Call predict() and update() with the SAME dt used to compute
+    the wheel speeds.
+  * Keep the units consistent (meters, seconds, radians).
+
+Build example (no CMake file is provided):
+
+  g++ -std=c++17 -I include -I library/eigen your_main.cpp src/ekf.cpp -o ekf_demo
+
+
+2b) INITIALIZING P0 (initial covariance)
+----------------------------------------
+Use the simple min/max method. For each state you only need the
+initial minimum and maximum value it can have at startup:
+
+  range = x0max - x0min
+  P0    = transpose(x0max - x0min) * (x0max - x0min) / 2
+
+In code (7x1 vectors x0min, x0max):
+
+  Eigen::Matrix<double,7,1> x0min, x0max;
+  Eigen::Matrix<double,7,1> d = x0max - x0min;
+  f.P = d * d.transpose() / 2.0;
+
+HOW TO GET x0min AND x0max FOR EACH STATE
+-----------------------------------------
+Just write the physical worst-case range you expect at t = 0.
+If the value is unknown, use the full sensor/robot range.
+
+  state      x0min         x0max         example
+  --------   -----------   -----------   -----------------------------
+  0 theta    -pi           +pi           known heading: th0 +/- 0.1
+  1 vx       -v_max        +v_max        at rest: 0 .. 0 -> use 1e-3
+  2 vy       -v_max        +v_max        at rest: 0 .. 0 -> use 1e-3
+  3 wz       -w_max        +w_max        e.g. -2 .. +2 rad/s
+  4 bias_ax  -0.5          +0.5          accel bias range
+  5 bias_ay  -0.5          +0.5          accel bias range
+  6 bias_wz  -0.1          +0.1          gyro bias range
+
+Where:
+  v_max = maximum linear speed of the robot [m/s]
+  w_max = maximum yaw rate of the robot     [rad/s]
+  th0   = heading measured at startup       [rad]
+
+Example (robot at rest, heading known within +/-0.1 rad):
+
+  x0min = [-0.1, 0.0, 0.0, -2.0, -0.5, -0.5, -0.1]
+  x0max = [ 0.1, 0.0, 0.0,  2.0,  0.5,  0.5,  0.1]
+
+Rules:
+  * If x0max == x0min the variance becomes 0 and the filter becomes
+    overconfident. Add a small value (e.g. 1e-6) in that case.
+  * Bigger range = bigger P0 = filter trusts the start guess less.
+  * P0 only affects the beginning; after a few updates it converges.
+
+
+3) R IS ENCODER NOISE
+---------------------
+R is the measurement noise covariance of the wheel encoders.
+It is NOT related to the IMU and it is NOT produced by tunning.py.
+
+The filter's update() measures two values: v_right and v_left.
+So R is a 2x2 matrix:
+
+  R = [ r_right    0     ]
+      [   0     r_left   ]
+
+  set_R(r_right, r_left);
+
+  r_right = variance of the RIGHT wheel speed measurement [(m/s)^2]
+  r_left  = variance of the LEFT  wheel speed measurement [(m/s)^2]
+
+How to estimate it:
+  * Log the wheel linear speed while the robot is standing still
+    (or driving at a constant speed) for a few seconds.
+  * Compute the variance (standard deviation squared) of each wheel.
+  * Use those numbers for r_right and r_left.
+  * If both wheels/encoders are similar you can use the same value.
+
+Rule of thumb:
+  * Small R  -> the filter trusts the encoders more.
+  * Large R  -> the filter trusts the encoders less (more IMU).
+
+Typical numeric values are small, for example 1e-4 to 1e-2 (m/s)^2,
+depending on encoder resolution, wheel radius and floor grip.
+
+Remember:
+  Q  -> how noisy the IMU is      (tuning tool)
+  R  -> how noisy the encoders are (set by you)
