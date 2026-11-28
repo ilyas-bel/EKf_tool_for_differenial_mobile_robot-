@@ -20,7 +20,7 @@ void ekf::predict(double ax, double ay, double wz, double dt) {
     const double gx = ax - prev_state(4);
     const double gy = ay - prev_state(5);
 
-    X(0) = prev_state(0) + dt * prev_state(3);          // theta
+    X(0) = prev_state(0) + dt * (wz - prev_state(6));         // theta
     X(1) = prev_state(1) + dt * (ct * gx - st * gy);    // vx
     X(2) = prev_state(2) + dt * (st * gx + ct * gy);    // vy
     X(3) = wz - prev_state(6);                          // wz
@@ -39,8 +39,8 @@ void ekf::predict(double ax, double ay, double wz, double dt) {
 
     // noise Jacobian
 // noise Jacobian (+noise on every input)
-G(1,0) =  dt*ct;  G(1,1) = -dt*st;  G(1,3) = -dt*ct;  G(1,4) =  dt*st;
-G(2,0) =  dt*st;  G(2,1) =  dt*ct;  G(2,3) = -dt*st;  G(2,4) = -dt*ct;
+G(1,0) =  ct;  G(1,1) = -st;  G(1,3) = -ct;  G(1,4) =  st;
+G(2,0) =  st;  G(2,1) =  ct;  G(2,3) = -st;  G(2,4) = -ct;
 G(3,2) =  1.0;                                         G(3,5) = -1.0;
 G(4,3) =  1.0;
 G(5,4) =  1.0;
